@@ -1,0 +1,8 @@
+{
+  "name": "Copy of EduPulse - Fully Loaded Online Courses",
+  "description": "Comprehensive online course platform covering Programming, Video Editing, AI, Data Analytics, Web/App Dev, Stock Trading, Cyber Security, MNC \u0026 Exam Prep, and Computer Basics with real-time Auth, OTP Verification, YouTube embeds, and AI Course Mentor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
