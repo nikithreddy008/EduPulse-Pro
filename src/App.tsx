@@ -12,7 +12,6 @@ import { Footer } from './components/Footer';
 import { COURSES_DATA, COURSE_CATEGORIES } from './data/coursesData';
 import { Course, CourseCategory, CourseLevel, UserProfile, LanguageCode } from './types';
 import { TRANSLATIONS } from './i18n/translations';
-import { auth, onAuthStateChanged, signOut, db, doc, getDoc } from './lib/firebase';
 import {
   Search,
   SlidersHorizontal,
@@ -33,7 +32,7 @@ export default function App() {
 
   const t = TRANSLATIONS[currentLang] || TRANSLATIONS.en;
 
-  // User Authentication State
+  // User Authentication State (Stored locally in localStorage)
   const [user, setUser] = useState<UserProfile | null>(() => {
     const saved = localStorage.getItem('edupulse_user');
     if (saved) {
@@ -51,38 +50,6 @@ export default function App() {
       localStorage.removeItem('edupulse_user');
     }
   }, [user]);
-
-  // Firebase Auth State Listener
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
-      if (fbUser) {
-        try {
-          const userRef = doc(db, 'users', fbUser.uid);
-          const userSnap = await getDoc(userRef);
-          if (userSnap.exists()) {
-            const data = userSnap.data();
-            setUser({
-              uid: fbUser.uid,
-              displayName: data.displayName || fbUser.displayName || 'Learner',
-              email: data.email || fbUser.email || '',
-              photoURL: data.photoURL || fbUser.photoURL || '',
-              authProvider: fbUser.providerData[0]?.providerId === 'google.com' ? 'google' : 'email',
-              enrolledCourseIds: data.enrolledCourseIds || ['prog-python-01'],
-              completedLessons: data.completedLessons || {},
-              completedCourses: data.completedCourses || [],
-              bookmarkedCourseIds: data.bookmarkedCourseIds || [],
-              quizScores: data.quizScores || {},
-              learningStreakDays: data.learningStreakDays || 1,
-              joinedDate: data.joinedDate || new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
-            });
-          }
-        } catch {
-          // Keep existing user state if firestore fails
-        }
-      }
-    });
-    return () => unsubscribe();
-  }, []);
 
   // Filters & Navigation State
   const [selectedCategory, setSelectedCategory] = useState<CourseCategory>('All');
@@ -178,7 +145,6 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    signOut(auth).catch(() => {});
     setUser(null);
     localStorage.removeItem('edupulse_user');
   };

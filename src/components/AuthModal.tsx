@@ -11,23 +11,10 @@ import {
   Eye,
   EyeOff,
   KeyRound,
-  ExternalLink,
   CheckCircle2,
 } from 'lucide-react';
 import { UserProfile } from '../types';
 import confetti from 'canvas-confetti';
-import {
-  auth,
-  googleProvider,
-  signInWithPopup,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  updateProfile,
-  db,
-  doc,
-  getDoc,
-  setDoc,
-} from '../lib/firebase';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -59,90 +46,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [errorMessage, setErrorMessage] = useState('');
   const [oauthStatus, setOauthStatus] = useState<string | null>(null);
 
-  // Sync or fetch user profile from Firestore / fallback API
-  const syncUserProfile = async (
-    uid: string,
-    email: string,
-    displayName: string,
-    photoURL: string,
-    provider: 'google' | 'email'
-  ): Promise<UserProfile> => {
-    try {
-      const userRef = doc(db, 'users', uid);
-      const userSnap = await getDoc(userRef);
-
-      if (userSnap.exists()) {
-        const data = userSnap.data();
-        return {
-          uid,
-          displayName: data.displayName || displayName,
-          email: data.email || email,
-          photoURL: data.photoURL || photoURL,
-          authProvider: provider,
-          enrolledCourseIds: data.enrolledCourseIds || ['prog-python-01'],
-          completedLessons: data.completedLessons || {},
-          completedCourses: data.completedCourses || [],
-          bookmarkedCourseIds: data.bookmarkedCourseIds || [],
-          quizScores: data.quizScores || {},
-          learningStreakDays: data.learningStreakDays || 1,
-          joinedDate: data.joinedDate || new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
-        };
-      } else {
-        const newProfile: UserProfile = {
-          uid,
-          displayName: displayName || email.split('@')[0],
-          email,
-          photoURL: photoURL || `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150`,
-          authProvider: provider,
-          enrolledCourseIds: ['prog-python-01', 'ai-prompt-genai-01'],
-          completedLessons: { 'prog-python-01': ['py-l1'] },
-          completedCourses: [],
-          bookmarkedCourseIds: ['edit-premiere-01'],
-          quizScores: {},
-          learningStreakDays: 1,
-          joinedDate: new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
-        };
-        await setDoc(userRef, newProfile);
-        return newProfile;
-      }
-    } catch {
-      // Fallback if Firestore rules or offline
-      return {
-        uid,
-        displayName: displayName || email.split('@')[0],
-        email,
-        photoURL: photoURL || `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150`,
-        authProvider: provider,
-        enrolledCourseIds: ['prog-python-01'],
-        completedLessons: {},
-        completedCourses: [],
-        bookmarkedCourseIds: [],
-        quizScores: {},
-        learningStreakDays: 1,
-        joinedDate: new Date().toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
-      };
-    }
-  };
-
   // Listen for OAuth 2.0 popup postMessage events
   useEffect(() => {
-    const handleMessage = async (event: MessageEvent) => {
+    const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
         const rawUser = event.data.user;
         if (rawUser) {
-          setLoading(true);
-          const fullProfile = await syncUserProfile(
-            rawUser.uid,
-            rawUser.email,
-            rawUser.displayName,
-            rawUser.photoURL,
-            'google'
-          );
           try {
             confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
           } catch {}
           setLoading(false);
-          onSuccess(fullProfile);
+          onSuccess(rawUser);
           onClose();
         }
       } else if (event.data?.type === 'OAUTH_AUTH_ERROR') {
@@ -157,7 +71,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Google Authentication: OAuth 2.0 Provider Popup -> Firebase Popup -> API Fallback
+  // Google Authentication: OAuth 2.0 Provider Popup -> Backend Direct Fallback
   const handleGoogleAuth = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setErrorMessage('');
@@ -188,59 +102,37 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         }
       }
 
-      // 2. If OAuth Client ID not configured in .env yet, try Firebase Popup Sign-In
-      const result = await signInWithPopup(auth, googleProvider);
-      const fbUser = result.user;
+      // 2. Direct Google Email backend authentication
+      const targetEmail = googleEmail.trim() || 'learner@gmail.com';
+      const response = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: targetEmail,
+          displayName: googleName.trim() || targetEmail.split('@')[0],
+          photoURL: `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150`,
+        }),
+      });
 
-      const profile = await syncUserProfile(
-        fbUser.uid,
-        fbUser.email || 'user@google.com',
-        fbUser.displayName || 'Learner',
-        fbUser.photoURL || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
-        'google'
-      );
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || 'Google Sign In failed.');
+      }
 
       try {
-        confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
+        confetti({ particleCount: 60, spread: 70, origin: { y: 0.6 } });
       } catch {}
 
-      onSuccess(profile);
+      onSuccess(data.user);
       onClose();
-    } catch (firebaseErr: unknown) {
-      // 3. Fallback: manual email / simulated Google endpoint if restricted in iframe
-      const targetEmail = googleEmail.trim() || 'learner@gmail.com';
-      try {
-        const response = await fetch('/api/auth/google', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: targetEmail,
-            displayName: googleName.trim() || targetEmail.split('@')[0],
-            photoURL: `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150`,
-          }),
-        });
-
-        const data = await response.json();
-        if (!response.ok || !data.success) {
-          throw new Error(data.message || 'Google Sign In failed.');
-        }
-
-        try {
-          confetti({ particleCount: 60, spread: 70, origin: { y: 0.6 } });
-        } catch {}
-
-        onSuccess(data.user);
-        onClose();
-      } catch (err) {
-        const msg = firebaseErr instanceof Error ? firebaseErr.message : 'Google sign in failed.';
-        setErrorMessage(msg);
-      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Google sign in failed.');
     } finally {
       setLoading(false);
     }
   };
 
-  // Email & Password Authentication via Firebase Auth
+  // Email & Password Authentication via Server API
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
@@ -273,73 +165,30 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setLoading(true);
 
     try {
-      if (isRegistering) {
-        // Firebase Auth Create User
-        const userCred = await createUserWithEmailAndPassword(auth, emailInput.trim(), password);
-        await updateProfile(userCred.user, { displayName: fullName.trim() });
-
-        const profile = await syncUserProfile(
-          userCred.user.uid,
-          emailInput.trim(),
-          fullName.trim(),
-          `https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150`,
-          'email'
-        );
-
-        try {
-          confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
-        } catch {}
-
-        onSuccess(profile);
-        onClose();
-      } else {
-        // Firebase Auth Sign In
-        const userCred = await signInWithEmailAndPassword(auth, emailInput.trim(), password);
-
-        const profile = await syncUserProfile(
-          userCred.user.uid,
-          userCred.user.email || emailInput.trim(),
-          userCred.user.displayName || emailInput.split('@')[0],
-          userCred.user.photoURL || `https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150`,
-          'email'
-        );
-
-        try {
-          confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
-        } catch {}
-
-        onSuccess(profile);
-        onClose();
-      }
-    } catch (fbErr: unknown) {
-      // Fallback to backend API authentication if Firebase fails or is restricted
       const endpoint = isRegistering ? '/api/auth/register' : '/api/auth/login';
       const payload = isRegistering
         ? { displayName: fullName.trim(), email: emailInput.trim(), password }
         : { email: emailInput.trim(), password };
 
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
 
-        const data = await response.json();
-        if (!response.ok || !data.success) {
-          const errCode = fbErr instanceof Error ? fbErr.message : data.message;
-          throw new Error(errCode || 'Authentication failed. Please check credentials.');
-        }
-
-        try {
-          confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
-        } catch {}
-
-        onSuccess(data.user);
-        onClose();
-      } catch (err) {
-        setErrorMessage(err instanceof Error ? err.message : 'Authentication failed.');
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || 'Authentication failed. Please check credentials.');
       }
+
+      try {
+        confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
+      } catch {}
+
+      onSuccess(data.user);
+      onClose();
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Authentication failed.');
     } finally {
       setLoading(false);
     }
@@ -388,7 +237,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.3 0 15s.7 5.3 1.9 7.7l3.7-2.9c-.8-.8-1.5-2.6-1.5-5s0 0 0 0z" />
               <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.3-6.4-5.2L1.9 16c1.8 3.7 5.6 7 10.1 7z" />
             </svg>
-            <span>Google OAuth / Sign In</span>
+            <span>Google Sign In</span>
           </button>
 
           <button
@@ -497,7 +346,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
             <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400 leading-relaxed space-y-1.5">
               <div className="flex items-center gap-1.5 font-semibold text-slate-300">
-                <Lock className="w-3.5 h-3.5 text-cyan-400" /> Google OAuth 2.0 & Firebase Enabled
+                <Lock className="w-3.5 h-3.5 text-cyan-400" /> Secure EduPulse Authentication
               </div>
               <p>
                 Your account details, certificates, and learning progress are securely stored and synced.
@@ -633,7 +482,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <RefreshCw className="w-4 h-4 animate-spin" />
               ) : (
                 <>
-                  <span>{isRegistering ? 'Register with Firebase' : 'Sign In with Firebase'}</span>
+                  <span>{isRegistering ? 'Create Account' : 'Sign In'}</span>
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
