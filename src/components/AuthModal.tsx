@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   ShieldCheck,
@@ -11,87 +11,15 @@ import {
   Eye,
   EyeOff,
   KeyRound,
-  Sparkles,
+  CheckCircle2,
 } from 'lucide-react';
 import { UserProfile } from '../types';
-import { createLocalProfile, findLocalUser, saveLocalUser } from '../lib/authStorage';
 import confetti from 'canvas-confetti';
 
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess: (user: UserProfile) => void;
-}
-
-// Type definition for Google Identity Services
-declare global {
-  interface Window {
-    google?: {
-      accounts?: {
-        id?: {
-          initialize: (config: {
-            client_id: string;
-            callback: (response: { credential: string }) => void;
-            auto_select?: boolean;
-            cancel_on_tap_outside?: boolean;
-          }) => void;
-          renderButton: (
-            parent: HTMLElement,
-            options: {
-              type?: 'standard' | 'icon';
-              theme?: 'outline' | 'filled_blue' | 'filled_black';
-              size?: 'large' | 'medium' | 'small';
-              text?: 'signin_with' | 'signup_with' | 'continue_with' | 'signin';
-              shape?: 'rectangular' | 'pill' | 'circle' | 'square';
-              logo_alignment?: 'left' | 'center';
-              width?: number | string;
-            }
-          ) => void;
-          prompt: (momentListener?: (notification: { isNotDisplayed: () => boolean; isSkippedMoment: () => boolean }) => void) => void;
-        };
-      };
-    };
-  }
-}
-
-// Safely parse JSON from fetch responses without throwing SyntaxErrors on HTML 404/500 responses
-async function safeFetchJson<T = Record<string, unknown>>(
-  url: string,
-  options?: RequestInit
-): Promise<{ ok: boolean; data?: T; isJson: boolean; status: number; error?: string }> {
-  try {
-    const res = await fetch(url, options);
-    const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      return { ok: false, isJson: false, status: res.status, error: 'NON_JSON_RESPONSE' };
-    }
-    const data = await res.json();
-    return { ok: res.ok, data, isJson: true, status: res.status };
-  } catch (err) {
-    return {
-      ok: false,
-      isJson: false,
-      status: 0,
-      error: err instanceof Error ? err.message : 'Network failure',
-    };
-  }
-}
-
-// Parse Google JWT ID token
-function parseGoogleJwt(token: string) {
-  try {
-    const base64Url = token.split('.')[1];
-    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    const jsonPayload = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
-    );
-    return JSON.parse(jsonPayload);
-  } catch {
-    return null;
-  }
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({
@@ -118,68 +46,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [errorMessage, setErrorMessage] = useState('');
   const [oauthStatus, setOauthStatus] = useState<string | null>(null);
 
-  const googleBtnContainerRef = useRef<HTMLDivElement | null>(null);
-
-  // Initialize Google Identity Services (GSI) if available
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
-    if (clientId && window.google?.accounts?.id && googleBtnContainerRef.current) {
-      try {
-        window.google.accounts.id.initialize({
-          client_id: clientId,
-          callback: (response) => {
-            if (response.credential) {
-              const payload = parseGoogleJwt(response.credential);
-              if (payload && payload.email) {
-                const profile = createLocalProfile(
-                  payload.email,
-                  payload.name || payload.given_name,
-                  payload.picture,
-                  'google'
-                );
-                try {
-                  confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
-                } catch {}
-                onSuccess(profile);
-                onClose();
-              }
-            }
-          },
-        });
-
-        // Render official GSI button into container
-        window.google.accounts.id.renderButton(googleBtnContainerRef.current, {
-          theme: 'filled_black',
-          size: 'large',
-          text: 'signin_with',
-          shape: 'pill',
-          width: 340,
-        });
-      } catch (err) {
-        console.warn('Google Identity Services initialization skipped:', err);
-      }
-    }
-  }, [isOpen, onSuccess, onClose]);
-
   // Listen for OAuth 2.0 popup postMessage events
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
         const rawUser = event.data.user;
         if (rawUser) {
-          const profile = createLocalProfile(
-            rawUser.email,
-            rawUser.displayName,
-            rawUser.photoURL,
-            'google'
-          );
           try {
             confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
           } catch {}
           setLoading(false);
-          onSuccess(profile);
+          onSuccess(rawUser);
           onClose();
         }
       } else if (event.data?.type === 'OAUTH_AUTH_ERROR') {
@@ -194,84 +71,68 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Complete Google Authentication handler:
-  // 1. Attempts Server OAuth 2.0 URL (Express backend)
-  // 2. Attempts Server /api/auth/google endpoint (Safe JSON check)
-  // 3. Seamlessly falls back to client-side local profile creation (Zero JSON errors on Vercel/Static hosts)
+  // Google Authentication: OAuth 2.0 Provider Popup -> Backend Direct Fallback
   const handleGoogleAuth = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setErrorMessage('');
     setOauthStatus(null);
     setLoading(true);
 
-    const targetEmail = googleEmail.trim() || 'learner@gmail.com';
-    const targetName = googleName.trim() || targetEmail.split('@')[0];
-
     try {
-      // 1. Try Google OAuth 2.0 Popup URL from backend if available
-      const oauthResult = await safeFetchJson<{ configured: boolean; url: string }>(
-        `/api/auth/google/url?origin=${encodeURIComponent(window.location.origin)}`
-      );
+      // 1. Try Google OAuth 2.0 Popup URL (Server endpoint)
+      const oauthRes = await fetch(`/api/auth/google/url?origin=${encodeURIComponent(window.location.origin)}`);
+      if (oauthRes.ok) {
+        const oauthData = await oauthRes.json();
+        if (oauthData.configured && oauthData.url) {
+          setOauthStatus('Connecting with Google OAuth 2.0...');
+          const authWindow = window.open(
+            oauthData.url,
+            'google_oauth_popup',
+            'width=550,height=650,left=200,top=100,resizable=yes,scrollbars=yes'
+          );
 
-      if (oauthResult.ok && oauthResult.data?.configured && oauthResult.data?.url) {
-        setOauthStatus('Connecting with Google OAuth...');
-        const authWindow = window.open(
-          oauthResult.data.url,
-          'google_oauth_popup',
-          'width=550,height=650,left=200,top=100,resizable=yes,scrollbars=yes'
-        );
-
-        if (authWindow) {
-          // Popup opened, will receive postMessage when finished
-          return;
+          if (authWindow) {
+            // Popup opened; waiting for postMessage
+            return;
+          } else {
+            setErrorMessage('Popup was blocked by your browser. Please allow popups for this site.');
+            setLoading(false);
+            return;
+          }
         }
       }
 
-      // 2. Try Server /api/auth/google POST endpoint
-      const serverAuthResult = await safeFetchJson<{ success: boolean; user: UserProfile; message?: string }>(
-        '/api/auth/google',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: targetEmail,
-            displayName: targetName,
-            photoURL: `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150`,
-          }),
-        }
-      );
+      // 2. Direct Google Email backend authentication
+      const targetEmail = googleEmail.trim() || 'learner@gmail.com';
+      const response = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: targetEmail,
+          displayName: googleName.trim() || targetEmail.split('@')[0],
+          photoURL: `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150`,
+        }),
+      });
 
-      let userProfile: UserProfile;
-
-      if (serverAuthResult.ok && serverAuthResult.data?.user) {
-        userProfile = serverAuthResult.data.user;
-      } else {
-        // 3. Seamless Client-side fallback (for Vercel static deployments)
-        userProfile = createLocalProfile(
-          targetEmail,
-          targetName,
-          `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150`,
-          'google'
-        );
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || 'Google Sign In failed.');
       }
 
       try {
-        confetti({ particleCount: 65, spread: 75, origin: { y: 0.6 } });
+        confetti({ particleCount: 60, spread: 70, origin: { y: 0.6 } });
       } catch {}
 
-      onSuccess(userProfile);
+      onSuccess(data.user);
       onClose();
-    } catch {
-      // Guaranteed safe fallback: never display a syntax/JSON error to the user
-      const fallbackUser = createLocalProfile(targetEmail, targetName, undefined, 'google');
-      onSuccess(fallbackUser);
-      onClose();
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Google sign in failed.');
     } finally {
       setLoading(false);
     }
   };
 
-  // Email & Password Authentication Handler
+  // Email & Password Authentication via Server API
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
@@ -309,81 +170,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         ? { displayName: fullName.trim(), email: emailInput.trim(), password }
         : { email: emailInput.trim(), password };
 
-      // Attempt server authentication
-      const result = await safeFetchJson<{ success: boolean; user: UserProfile; message?: string }>(
-        endpoint,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        }
-      );
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
 
-      if (result.isJson) {
-        if (result.ok && result.data?.user) {
-          try {
-            confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
-          } catch {}
-          onSuccess(result.data.user);
-          onClose();
-          return;
-        } else {
-          setErrorMessage(result.data?.message || 'Authentication failed. Please check your credentials.');
-          return;
-        }
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || 'Authentication failed. Please check credentials.');
       }
 
-      // Static Deployment Client Fallback (e.g. on Vercel without Node server)
-      const normalizedEmail = emailInput.trim().toLowerCase();
-      const existingUser = findLocalUser(normalizedEmail);
+      try {
+        confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
+      } catch {}
 
-      if (isRegistering) {
-        if (existingUser) {
-          setErrorMessage('An account with this email already exists. Please sign in instead.');
-          return;
-        }
-        const newUser = createLocalProfile(
-          normalizedEmail,
-          fullName.trim(),
-          undefined,
-          'email',
-          password
-        );
-        try {
-          confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
-        } catch {}
-        onSuccess(newUser);
-        onClose();
-      } else {
-        if (!existingUser) {
-          // If no local account, auto-create profile seamlessly for quick learner onboarding
-          const autoUser = createLocalProfile(
-            normalizedEmail,
-            normalizedEmail.split('@')[0],
-            undefined,
-            'email',
-            password
-          );
-          try {
-            confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
-          } catch {}
-          onSuccess(autoUser);
-          onClose();
-          return;
-        }
-
-        if (existingUser.password && existingUser.password !== password) {
-          setErrorMessage('Incorrect password. Please try again.');
-          return;
-        }
-
-        const { password: _, ...cleanProfile } = existingUser;
-        try {
-          confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
-        } catch {}
-        onSuccess(cleanProfile);
-        onClose();
-      }
+      onSuccess(data.user);
+      onClose();
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Authentication failed.');
     } finally {
@@ -409,7 +212,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </div>
           <h2 className="text-2xl font-extrabold text-white tracking-tight">Welcome to EduPulse</h2>
           <p className="text-xs text-slate-400 mt-1">
-            Access 180+ Full YouTube Video Courses & Certifications
+            Access 180+ YouTube Courses & Verified Certifications
           </p>
         </div>
 
@@ -473,11 +276,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         {/* Tab 1: Google Account */}
         {activeTab === 'google' && (
-          <div className="space-y-4">
-            {/* Optional GSI Container */}
-            <div ref={googleBtnContainerRef} className="flex justify-center empty:hidden" />
-
-            {/* Primary Google Button */}
+          <form onSubmit={handleGoogleAuth} className="space-y-4">
             <button
               type="button"
               onClick={() => handleGoogleAuth()}
@@ -505,57 +304,55 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <div className="flex-grow border-t border-slate-800"></div>
             </div>
 
-            <form onSubmit={handleGoogleAuth} className="space-y-3">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Google Email Address
-                </label>
-                <div className="relative">
-                  <Mail className="w-4 h-4 absolute left-3.5 top-3 text-slate-500" />
-                  <input
-                    type="email"
-                    placeholder="yourname@gmail.com"
-                    value={googleEmail}
-                    onChange={(e) => setGoogleEmail(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                Google Email Address
+              </label>
+              <div className="relative">
+                <Mail className="w-4 h-4 absolute left-3.5 top-3 text-slate-500" />
+                <input
+                  type="email"
+                  placeholder="yourname@gmail.com"
+                  value={googleEmail}
+                  onChange={(e) => setGoogleEmail(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                />
               </div>
+            </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Full Name (Optional)
-                </label>
-                <div className="relative">
-                  <User className="w-4 h-4 absolute left-3.5 top-3 text-slate-500" />
-                  <input
-                    type="text"
-                    placeholder="Enter your full name"
-                    value={googleName}
-                    onChange={(e) => setGoogleName(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                  />
-                </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                Full Name (Optional)
+              </label>
+              <div className="relative">
+                <User className="w-4 h-4 absolute left-3.5 top-3 text-slate-500" />
+                <input
+                  type="text"
+                  placeholder="Enter your full name"
+                  value={googleName}
+                  onChange={(e) => setGoogleName(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                />
               </div>
+            </div>
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition-all border border-slate-700"
-              >
-                <span>Continue with Email</span>
-              </button>
-            </form>
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition-all border border-slate-700"
+            >
+              <span>Continue with Google Email</span>
+            </button>
 
             <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400 leading-relaxed space-y-1.5">
               <div className="flex items-center gap-1.5 font-semibold text-slate-300">
-                <Lock className="w-3.5 h-3.5 text-cyan-400" /> Vercel & Production Ready
+                <Lock className="w-3.5 h-3.5 text-cyan-400" /> Secure EduPulse Authentication
               </div>
               <p>
-                Your learning progress, quiz scores, and certificates are automatically synced and persisted across all devices.
+                Your account details, certificates, and learning progress are securely stored and synced.
               </p>
             </div>
-          </div>
+          </form>
         )}
 
         {/* Tab 2: Email & Password */}

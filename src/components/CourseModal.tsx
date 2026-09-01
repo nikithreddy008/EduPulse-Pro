@@ -123,14 +123,10 @@ export const CourseModal: React.FC<CourseModalProps> = ({
           },
         }),
       });
-      let reply = 'I am here to guide your learning!';
-      if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
-        const data = await res.json();
-        if (data.reply) reply = data.reply;
-      }
+      const data = await res.json();
       setAiChatMessages((prev) => [
         ...prev,
-        { sender: 'ai', text: reply },
+        { sender: 'ai', text: data.reply || 'I am here to guide your learning!' },
       ]);
     } catch {
       setAiChatMessages((prev) => [
