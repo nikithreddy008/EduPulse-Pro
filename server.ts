@@ -203,27 +203,36 @@ app.post('/api/auth/google', (req, res) => {
 
 // Google OAuth 2.0: Get Authorization URL
 app.get('/api/auth/google/url', (req, res) => {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
   const clientOrigin = (req.query.origin as string) || process.env.APP_URL || 'http://localhost:3000';
   const cleanOrigin = clientOrigin.replace(/\/+$/, '');
   const redirectUri = `${cleanOrigin}/auth/callback`;
 
-  if (!clientId) {
+  if (!clientId || !clientSecret) {
     return res.json({
       success: false,
       configured: false,
-      message: 'GOOGLE_CLIENT_ID environment variable is not configured yet.',
+      message: 'GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET environment variable is not configured yet in Settings > Secrets.',
       redirectUri,
     });
   }
+
+  const statePayload = Buffer.from(
+    JSON.stringify({
+      redirectUri,
+      t: Date.now(),
+    })
+  ).toString('base64url');
 
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
     scope: 'openid email profile',
-    access_type: 'offline',
+    access_type: 'online',
     prompt: 'select_account',
+    state: statePayload,
   });
 
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
@@ -233,26 +242,39 @@ app.get('/api/auth/google/url', (req, res) => {
     configured: true,
     url: authUrl,
     redirectUri,
+    clientId: clientId.slice(0, 12) + '...',
   });
 });
 
 // Google OAuth 2.0: Callback Handler for Popup
 app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
-  const { code, error } = req.query;
+  const { code, error, state } = req.query;
 
   if (error || !code) {
-    const errorMsg = (error as string) || 'Authorization was cancelled or failed.';
+    const errorMsg = (error as string) || 'Google Authorization was cancelled or denied.';
     return res.send(`
       <!DOCTYPE html>
       <html>
-        <head><title>Google Authentication</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #0f172a; color: #f87171;">
-          <h2>Authentication Failed</h2>
-          <p>${errorMsg}</p>
+        <head>
+          <meta charset="utf-8">
+          <title>Google Authentication</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; padding: 40px 20px; background: #090d16; color: #f87171; }
+            .box { max-width: 420px; margin: 0 auto; background: #131b2e; border: 1px solid rgba(248,113,113,0.3); border-radius: 16px; padding: 24px; }
+            h2 { margin-top: 0; color: #ef4444; }
+            p { color: #cbd5e1; font-size: 14px; }
+          </style>
+        </head>
+        <body>
+          <div class="box">
+            <h2>Authentication Failed</h2>
+            <p>${errorMsg}</p>
+            <p style="color: #64748b; font-size: 12px;">This window will close automatically.</p>
+          </div>
           <script>
             if (window.opener) {
               window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: ${JSON.stringify(errorMsg)} }, '*');
-              setTimeout(() => window.close(), 1500);
+              setTimeout(function() { window.close(); }, 2500);
             }
           </script>
         </body>
@@ -265,7 +287,29 @@ app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
     const host = req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000';
     const origin = process.env.APP_URL || `${protocol}://${host}`;
     const cleanOrigin = origin.replace(/\/+$/, '');
-    const redirectUri = `${cleanOrigin}/auth/callback`;
+    let redirectUri = `${cleanOrigin}/auth/callback`;
+
+    // Decode exact redirectUri used during the authorization request from state
+    if (state && typeof state === 'string') {
+      try {
+        const decoded = JSON.parse(Buffer.from(state, 'base64url').toString('utf8'));
+        if (decoded && decoded.redirectUri) {
+          redirectUri = decoded.redirectUri;
+        }
+      } catch {
+        try {
+          const decoded = JSON.parse(Buffer.from(state, 'base64').toString('utf8'));
+          if (decoded && decoded.redirectUri) {
+            redirectUri = decoded.redirectUri;
+          }
+        } catch {
+          // Keep default redirectUri
+        }
+      }
+    }
+
+    const clientId = process.env.GOOGLE_CLIENT_ID?.trim() || '';
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim() || '';
 
     // Exchange authorization code for tokens
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
@@ -273,8 +317,8 @@ app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         code: code as string,
-        client_id: process.env.GOOGLE_CLIENT_ID || '',
-        client_secret: process.env.GOOGLE_CLIENT_SECRET || '',
+        client_id: clientId,
+        client_secret: clientSecret,
         redirect_uri: redirectUri,
         grant_type: 'authorization_code',
       }),
@@ -284,19 +328,35 @@ app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
 
     if (!tokenResponse.ok || !tokenData.access_token) {
       console.error('Failed to exchange code for tokens:', tokenData);
-      const errMsg = tokenData.error_description || tokenData.error || 'Failed to exchange authorization code.';
+      const errMsg =
+        tokenData.error_description ||
+        tokenData.error ||
+        'Failed to exchange authorization code for Google token.';
       return res.send(`
         <!DOCTYPE html>
         <html>
-          <head><title>Google Authentication</title></head>
-          <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #0f172a; color: #f87171;">
-            <h2>Authentication Error</h2>
-            <p>${errMsg}</p>
-            <p style="color: #94a3b8; font-size: 12px;">Make sure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are valid and the redirect URI matches Google Cloud Console.</p>
+          <head>
+            <meta charset="utf-8">
+            <title>Google Authentication Error</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; padding: 40px 20px; background: #090d16; color: #f87171; }
+              .box { max-width: 460px; margin: 0 auto; background: #131b2e; border: 1px solid rgba(248,113,113,0.3); border-radius: 16px; padding: 24px; text-align: left; }
+              h2 { margin-top: 0; color: #ef4444; text-align: center; }
+              p { color: #cbd5e1; font-size: 13px; line-height: 1.5; }
+              code { background: #090d16; padding: 2px 6px; border-radius: 4px; color: #38bdf8; font-family: monospace; font-size: 12px; }
+            </style>
+          </head>
+          <body>
+            <div class="box">
+              <h2>Authentication Error</h2>
+              <p><strong>Details:</strong> ${errMsg}</p>
+              <p><strong>Redirect URI Used:</strong> <code>${redirectUri}</code></p>
+              <p style="color: #94a3b8; font-size: 12px;">Please make sure this exact Redirect URI is added under <em>Authorized redirect URIs</em> in your Google Cloud Console Credentials.</p>
+            </div>
             <script>
               if (window.opener) {
                 window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: ${JSON.stringify(errMsg)} }, '*');
-                setTimeout(() => window.close(), 2500);
+                setTimeout(function() { window.close(); }, 4000);
               }
             </script>
           </body>
@@ -323,7 +383,9 @@ app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
         uid: `google_oauth_${googleUser.sub || Date.now()}`,
         displayName: googleUser.name || googleUser.given_name || normalizedEmail.split('@')[0],
         email: normalizedEmail,
-        photoURL: googleUser.picture || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
+        photoURL:
+          googleUser.picture ||
+          'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
         authProvider: 'google',
         enrolledCourseIds: ['prog-python-01', 'ai-prompt-genai-01'],
         completedLessons: { 'prog-python-01': ['py-l1'] },
@@ -345,14 +407,26 @@ app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
     return res.send(`
       <!DOCTYPE html>
       <html>
-        <head><title>Authentication Successful</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #0f172a; color: #38bdf8;">
-          <h2>Signed In Successfully!</h2>
-          <p style="color: #94a3b8;">Welcome, ${sanitized.displayName}. Closing window...</p>
+        <head>
+          <meta charset="utf-8">
+          <title>Authentication Successful</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; padding: 40px 20px; background: #090d16; color: #38bdf8; }
+            .box { max-width: 400px; margin: 0 auto; background: #131b2e; border: 1px solid rgba(56,189,248,0.3); border-radius: 16px; padding: 28px; }
+            h2 { margin-top: 0; color: #38bdf8; }
+            p { color: #94a3b8; font-size: 14px; }
+          </style>
+        </head>
+        <body>
+          <div class="box">
+            <h2>Signed In Successfully!</h2>
+            <p>Welcome, <strong>${sanitized.displayName}</strong> (${sanitized.email})</p>
+            <p style="color: #64748b; font-size: 12px;">Closing this window and returning to EduPulse...</p>
+          </div>
           <script>
             if (window.opener) {
               window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', user: ${JSON.stringify(sanitized)} }, '*');
-              window.close();
+              setTimeout(function() { window.close(); }, 600);
             } else {
               window.location.href = '/';
             }
@@ -365,14 +439,20 @@ app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
     return res.send(`
       <!DOCTYPE html>
       <html>
-        <head><title>Google Authentication</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #0f172a; color: #f87171;">
+        <head>
+          <meta charset="utf-8">
+          <title>Google Authentication Error</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; padding: 40px; background: #090d16; color: #f87171; }
+          </style>
+        </head>
+        <body>
           <h2>Authentication Error</h2>
           <p>${err instanceof Error ? err.message : 'Server error processing Google Sign In.'}</p>
           <script>
             if (window.opener) {
               window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: 'Authentication failed.' }, '*');
-              setTimeout(() => window.close(), 2000);
+              setTimeout(function() { window.close(); }, 2000);
             }
           </script>
         </body>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   ShieldCheck,
@@ -12,6 +12,8 @@ import {
   EyeOff,
   KeyRound,
   CheckCircle2,
+  Copy,
+  ExternalLink,
 } from 'lucide-react';
 import { UserProfile } from '../types';
 import confetti from 'canvas-confetti';
@@ -37,7 +39,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
-  // Google Input State
+  // Google OAuth Config State
+  const [isOauthConfigured, setIsOauthConfigured] = useState<boolean | null>(null);
+  const [oauthRedirectUri, setOauthRedirectUri] = useState<string>('');
+  const [copiedRedirectUri, setCopiedRedirectUri] = useState(false);
+
+  // Google Demo Input State
   const [googleEmail, setGoogleEmail] = useState('');
   const [googleName, setGoogleName] = useState('');
 
@@ -45,10 +52,33 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [oauthStatus, setOauthStatus] = useState<string | null>(null);
+  const popupRef = useRef<Window | null>(null);
+
+  // Check OAuth configuration on mount / open
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const checkOAuthConfig = async () => {
+      try {
+        const origin = window.location.origin;
+        const res = await fetch(`/api/auth/google/url?origin=${encodeURIComponent(origin)}`);
+        if (res.ok) {
+          const data = await res.json();
+          setIsOauthConfigured(Boolean(data.configured));
+          setOauthRedirectUri(data.redirectUri || `${origin}/auth/callback`);
+        }
+      } catch {
+        setIsOauthConfigured(false);
+      }
+    };
+
+    checkOAuthConfig();
+  }, [isOpen]);
 
   // Listen for OAuth 2.0 popup postMessage events
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
+      // Allow localhost or Cloud Run domains
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
         const rawUser = event.data.user;
         if (rawUser) {
@@ -56,12 +86,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
           } catch {}
           setLoading(false);
+          setOauthStatus(null);
+          if (popupRef.current && !popupRef.current.closed) {
+            popupRef.current.close();
+          }
           onSuccess(rawUser);
           onClose();
         }
       } else if (event.data?.type === 'OAUTH_AUTH_ERROR') {
         setLoading(false);
+        setOauthStatus(null);
         setErrorMessage(event.data.error || 'Google OAuth failed.');
+        if (popupRef.current && !popupRef.current.closed) {
+          popupRef.current.close();
+        }
       }
     };
 
@@ -71,39 +109,79 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Google Authentication: OAuth 2.0 Provider Popup -> Backend Direct Fallback
-  const handleGoogleAuth = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
+  // Google Authentication via OAuth 2.0 Popup
+  const handleGoogleOAuthLogin = async () => {
     setErrorMessage('');
-    setOauthStatus(null);
+    setOauthStatus('Connecting to Google OAuth...');
     setLoading(true);
 
     try {
-      // 1. Try Google OAuth 2.0 Popup URL (Server endpoint)
-      const oauthRes = await fetch(`/api/auth/google/url?origin=${encodeURIComponent(window.location.origin)}`);
-      if (oauthRes.ok) {
-        const oauthData = await oauthRes.json();
-        if (oauthData.configured && oauthData.url) {
-          setOauthStatus('Connecting with Google OAuth 2.0...');
-          const authWindow = window.open(
-            oauthData.url,
-            'google_oauth_popup',
-            'width=550,height=650,left=200,top=100,resizable=yes,scrollbars=yes'
-          );
+      const origin = window.location.origin;
+      const oauthRes = await fetch(`/api/auth/google/url?origin=${encodeURIComponent(origin)}`);
+      const oauthData = await oauthRes.json();
 
-          if (authWindow) {
-            // Popup opened; waiting for postMessage
-            return;
-          } else {
-            setErrorMessage('Popup was blocked by your browser. Please allow popups for this site.');
-            setLoading(false);
-            return;
-          }
-        }
+      if (!oauthRes.ok || !oauthData.configured || !oauthData.url) {
+        setIsOauthConfigured(false);
+        setOauthRedirectUri(oauthData.redirectUri || `${origin}/auth/callback`);
+        setErrorMessage(
+          oauthData.message ||
+            'Google OAuth credentials not found. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Settings > Secrets.'
+        );
+        setLoading(false);
+        setOauthStatus(null);
+        return;
       }
 
-      // 2. Direct Google Email backend authentication
-      const targetEmail = googleEmail.trim() || 'learner@gmail.com';
+      // Open Google Consent Screen directly in popup
+      const width = 520;
+      const height = 650;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2.5;
+
+      const authWindow = window.open(
+        oauthData.url,
+        'google_oauth_popup',
+        `width=${width},height=${height},left=${left},top=${top},status=no,resizable=yes,scrollbars=yes`
+      );
+
+      if (!authWindow) {
+        setErrorMessage('Popup was blocked by your browser. Please allow popups for this site.');
+        setLoading(false);
+        setOauthStatus(null);
+        return;
+      }
+
+      popupRef.current = authWindow;
+      setOauthStatus('Waiting for Google authorization in popup...');
+
+      // Monitor popup window closure
+      const timer = setInterval(() => {
+        if (authWindow.closed) {
+          clearInterval(timer);
+          setLoading((prev) => {
+            if (prev) {
+              setOauthStatus(null);
+              return false;
+            }
+            return prev;
+          });
+        }
+      }, 800);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Google OAuth failed to start.');
+      setLoading(false);
+      setOauthStatus(null);
+    }
+  };
+
+  // Direct Google Email Demo Login (Fallback)
+  const handleGoogleDirectAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage('');
+    setLoading(true);
+
+    const targetEmail = googleEmail.trim() || 'learner@gmail.com';
+    try {
       const response = await fetch('/api/auth/google', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -194,6 +272,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedRedirectUri(true);
+    setTimeout(() => setCopiedRedirectUri(false), 2500);
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
       <div className="relative w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden text-slate-100 p-6 max-h-[90vh] overflow-y-auto">
@@ -212,7 +296,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </div>
           <h2 className="text-2xl font-extrabold text-white tracking-tight">Welcome to EduPulse</h2>
           <p className="text-xs text-slate-400 mt-1">
-            Access 180+ YouTube Courses & Verified Certifications
+            Access 180+ Free YouTube Courses & Verified Certifications
           </p>
         </div>
 
@@ -237,7 +321,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.3 0 15s.7 5.3 1.9 7.7l3.7-2.9c-.8-.8-1.5-2.6-1.5-5s0 0 0 0z" />
               <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.3-6.4-5.2L1.9 16c1.8 3.7 5.6 7 10.1 7z" />
             </svg>
-            <span>Google Sign In</span>
+            <span>Google OAuth</span>
           </button>
 
           <button
@@ -276,14 +360,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         {/* Tab 1: Google Account */}
         {activeTab === 'google' && (
-          <form onSubmit={handleGoogleAuth} className="space-y-4">
+          <div className="space-y-4">
+            {/* Primary Google OAuth 2.0 Button */}
             <button
               type="button"
-              onClick={() => handleGoogleAuth()}
+              onClick={handleGoogleOAuthLogin}
               disabled={loading}
-              className="w-full py-3.5 px-4 bg-white hover:bg-slate-100 text-slate-900 font-bold rounded-2xl flex items-center justify-center gap-3 transition-all shadow-lg shadow-white/10 active:scale-[0.99]"
+              className="w-full py-3.5 px-4 bg-white hover:bg-slate-100 text-slate-900 font-bold rounded-2xl flex items-center justify-center gap-3 transition-all shadow-lg shadow-white/10 active:scale-[0.99] cursor-pointer"
             >
-              {loading ? (
+              {loading && oauthStatus ? (
                 <RefreshCw className="w-5 h-5 animate-spin text-slate-900" />
               ) : (
                 <>
@@ -298,61 +383,80 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               )}
             </button>
 
+            {/* OAuth Setup Info / Guide */}
+            {isOauthConfigured === false && (
+              <div className="p-3.5 bg-slate-950/90 rounded-2xl border border-amber-500/30 text-xs text-slate-300 space-y-2">
+                <div className="flex items-center gap-1.5 font-bold text-amber-400">
+                  <AlertCircle className="w-4 h-4" />
+                  <span>Google OAuth Setup Needed</span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  To complete Google OAuth sign-in with your Client ID & Secret:
+                </p>
+                <div className="space-y-1.5 text-[11px]">
+                  <div className="p-2 bg-slate-900 rounded-lg border border-slate-800">
+                    <span className="text-slate-400">1. In AI Studio <strong>Settings &gt; Secrets</strong>:</span>
+                    <div className="font-mono text-cyan-400 mt-0.5">GOOGLE_CLIENT_ID</div>
+                    <div className="font-mono text-cyan-400">GOOGLE_CLIENT_SECRET</div>
+                  </div>
+                  <div className="p-2 bg-slate-900 rounded-lg border border-slate-800">
+                    <span className="text-slate-400">2. In Google Cloud Console <strong>Authorized redirect URIs</strong>:</span>
+                    <div className="flex items-center justify-between gap-1 mt-1 bg-slate-950 p-1.5 rounded font-mono text-[10px] text-cyan-300 break-all">
+                      <span>{oauthRedirectUri || `${window.location.origin}/auth/callback`}</span>
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(oauthRedirectUri || `${window.location.origin}/auth/callback`)}
+                        className="shrink-0 p-1 text-slate-400 hover:text-white"
+                        title="Copy Redirect URI"
+                      >
+                        {copiedRedirectUri ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {isOauthConfigured === true && (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl text-[11px] text-emerald-300 flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                <span>Google OAuth 2.0 is active and ready to authenticate.</span>
+              </div>
+            )}
+
+            {/* Direct Google Demo Login Divider & Form */}
             <div className="relative flex py-1 items-center">
               <div className="flex-grow border-t border-slate-800"></div>
-              <span className="flex-shrink mx-3 text-[11px] text-slate-500 font-medium">Or enter Google email directly</span>
+              <span className="flex-shrink mx-3 text-[11px] text-slate-500 font-medium">Or quick demo sign in</span>
               <div className="flex-grow border-t border-slate-800"></div>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Google Email Address
-              </label>
-              <div className="relative">
-                <Mail className="w-4 h-4 absolute left-3.5 top-3 text-slate-500" />
-                <input
-                  type="email"
-                  placeholder="yourname@gmail.com"
-                  value={googleEmail}
-                  onChange={(e) => setGoogleEmail(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                />
+            <form onSubmit={handleGoogleDirectAuth} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Google Email Address
+                </label>
+                <div className="relative">
+                  <Mail className="w-4 h-4 absolute left-3.5 top-3 text-slate-500" />
+                  <input
+                    type="email"
+                    placeholder="yourname@gmail.com"
+                    value={googleEmail}
+                    onChange={(e) => setGoogleEmail(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
               </div>
-            </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                Full Name (Optional)
-              </label>
-              <div className="relative">
-                <User className="w-4 h-4 absolute left-3.5 top-3 text-slate-500" />
-                <input
-                  type="text"
-                  placeholder="Enter your full name"
-                  value={googleName}
-                  onChange={(e) => setGoogleName(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition-all border border-slate-700"
-            >
-              <span>Continue with Google Email</span>
-            </button>
-
-            <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400 leading-relaxed space-y-1.5">
-              <div className="flex items-center gap-1.5 font-semibold text-slate-300">
-                <Lock className="w-3.5 h-3.5 text-cyan-400" /> Secure EduPulse Authentication
-              </div>
-              <p>
-                Your account details, certificates, and learning progress are securely stored and synced.
-              </p>
-            </div>
-          </form>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition-all border border-slate-700"
+              >
+                <span>Continue with Email Address</span>
+              </button>
+            </form>
+          </div>
         )}
 
         {/* Tab 2: Email & Password */}
