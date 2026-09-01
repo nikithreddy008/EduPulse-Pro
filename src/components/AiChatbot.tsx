@@ -61,10 +61,15 @@ export const AiChatbot: React.FC<AiChatbotProps> = ({ isOpen, onToggle }) => {
         }),
       });
 
-      const data = await res.json();
-      const botReplyText =
-        data.reply ||
-        `Thank you for asking! For "${textToSend}", you can explore our dedicated modules under the Programming, AI, and Web Development categories. All courses feature full Youtube video lessons, notes, and certificates.`;
+      let botReplyText = '';
+      if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
+        const data = await res.json();
+        botReplyText = data.reply;
+      }
+
+      if (!botReplyText) {
+        botReplyText = `Thank you for asking! For "${textToSend}", you can explore our dedicated modules under the Programming, AI, and Web Development categories. All courses feature full Youtube video lessons, notes, and certificates.`;
+      }
 
       const botMsg: ChatMessage = {
         id: `bot_${Date.now()}`,
