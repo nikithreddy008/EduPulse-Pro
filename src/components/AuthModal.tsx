@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   ShieldCheck,
@@ -11,7 +11,8 @@ import {
   Eye,
   EyeOff,
   KeyRound,
-  Sparkles,
+  ExternalLink,
+  CheckCircle2,
 } from 'lucide-react';
 import { UserProfile } from '../types';
 import confetti from 'canvas-confetti';
@@ -56,8 +57,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // UI State
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-
-  if (!isOpen) return null;
+  const [oauthStatus, setOauthStatus] = useState<string | null>(null);
 
   // Sync or fetch user profile from Firestore / fallback API
   const syncUserProfile = async (
@@ -124,14 +124,71 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  // Google Authentication with Firebase Popup & Fallback API
+  // Listen for OAuth 2.0 popup postMessage events
+  useEffect(() => {
+    const handleMessage = async (event: MessageEvent) => {
+      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
+        const rawUser = event.data.user;
+        if (rawUser) {
+          setLoading(true);
+          const fullProfile = await syncUserProfile(
+            rawUser.uid,
+            rawUser.email,
+            rawUser.displayName,
+            rawUser.photoURL,
+            'google'
+          );
+          try {
+            confetti({ particleCount: 70, spread: 80, origin: { y: 0.6 } });
+          } catch {}
+          setLoading(false);
+          onSuccess(fullProfile);
+          onClose();
+        }
+      } else if (event.data?.type === 'OAUTH_AUTH_ERROR') {
+        setLoading(false);
+        setErrorMessage(event.data.error || 'Google OAuth failed.');
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [onSuccess, onClose]);
+
+  if (!isOpen) return null;
+
+  // Google Authentication: OAuth 2.0 Provider Popup -> Firebase Popup -> API Fallback
   const handleGoogleAuth = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setErrorMessage('');
+    setOauthStatus(null);
     setLoading(true);
 
     try {
-      // Attempt Firebase Popup Sign In
+      // 1. Try Google OAuth 2.0 Popup URL (Server endpoint)
+      const oauthRes = await fetch(`/api/auth/google/url?origin=${encodeURIComponent(window.location.origin)}`);
+      if (oauthRes.ok) {
+        const oauthData = await oauthRes.json();
+        if (oauthData.configured && oauthData.url) {
+          setOauthStatus('Connecting with Google OAuth 2.0...');
+          const authWindow = window.open(
+            oauthData.url,
+            'google_oauth_popup',
+            'width=550,height=650,left=200,top=100,resizable=yes,scrollbars=yes'
+          );
+
+          if (authWindow) {
+            // Popup opened; waiting for postMessage
+            return;
+          } else {
+            setErrorMessage('Popup was blocked by your browser. Please allow popups for this site.');
+            setLoading(false);
+            return;
+          }
+        }
+      }
+
+      // 2. If OAuth Client ID not configured in .env yet, try Firebase Popup Sign-In
       const result = await signInWithPopup(auth, googleProvider);
       const fbUser = result.user;
 
@@ -150,7 +207,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       onSuccess(profile);
       onClose();
     } catch (firebaseErr: unknown) {
-      // Popup blocked or frame restricted fallback to API endpoint
+      // 3. Fallback: manual email / simulated Google endpoint if restricted in iframe
       const targetEmail = googleEmail.trim() || 'learner@gmail.com';
       try {
         const response = await fetch('/api/auth/google', {
@@ -317,6 +374,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             onClick={() => {
               setActiveTab('google');
               setErrorMessage('');
+              setOauthStatus(null);
             }}
             className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 ${
               activeTab === 'google'
@@ -330,7 +388,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 12.3 0 15s.7 5.3 1.9 7.7l3.7-2.9c-.8-.8-1.5-2.6-1.5-5s0 0 0 0z" />
               <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.3-6.4-5.2L1.9 16c1.8 3.7 5.6 7 10.1 7z" />
             </svg>
-            <span>Google Firebase</span>
+            <span>Google OAuth / Sign In</span>
           </button>
 
           <button
@@ -338,6 +396,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             onClick={() => {
               setActiveTab('email');
               setErrorMessage('');
+              setOauthStatus(null);
             }}
             className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 ${
               activeTab === 'email'
@@ -355,6 +414,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-start gap-2 animate-in fade-in">
             <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
             <span>{errorMessage}</span>
+          </div>
+        )}
+
+        {/* Status Alert */}
+        {oauthStatus && (
+          <div className="mb-4 p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs flex items-center gap-2 animate-in fade-in">
+            <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
+            <span>{oauthStatus}</span>
           </div>
         )}
 
@@ -384,7 +451,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
             <div className="relative flex py-1 items-center">
               <div className="flex-grow border-t border-slate-800"></div>
-              <span className="flex-shrink mx-3 text-[11px] text-slate-500 font-medium">Or enter Google email manually</span>
+              <span className="flex-shrink mx-3 text-[11px] text-slate-500 font-medium">Or enter Google email directly</span>
               <div className="flex-grow border-t border-slate-800"></div>
             </div>
 
@@ -428,11 +495,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <span>Continue with Google Email</span>
             </button>
 
-            <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400 leading-relaxed">
-              <p className="flex items-center gap-1.5 font-semibold text-slate-300 mb-1">
-                <Lock className="w-3.5 h-3.5 text-cyan-400" /> Connected to Firebase Authentication
+            <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 text-[11px] text-slate-400 leading-relaxed space-y-1.5">
+              <div className="flex items-center gap-1.5 font-semibold text-slate-300">
+                <Lock className="w-3.5 h-3.5 text-cyan-400" /> Google OAuth 2.0 & Firebase Enabled
+              </div>
+              <p>
+                Your account details, certificates, and learning progress are securely stored and synced.
               </p>
-              Your account details, certificates, and learning progress are securely stored with Firebase Firestore.
             </div>
           </form>
         )}
